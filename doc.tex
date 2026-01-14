@@ -1,0 +1,269 @@
+% !TeX root = main.tex
+% !TeX encoding = UTF-8
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{はじめに}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+近年，移動ロボットやドローンの自律飛行において，自己位置推定は基盤となる技術である．
+LiDARやカメラを用いた手法は高精度な位置情報が得られる反面，計算コストが高く，更新レートが低い（数Hz〜数十Hz）という特性がある．
+一方，MEMS-IMU（Inertial Measurement Unit）はkHzオーダーの高周波計測が可能であるが，センサノイズの積分により位置誤差が時間の二乗で累積する課題がある．
+
+このため，IMUによる高周波なデッドレコニングを主軸としつつ，低周波な外部観測情報を用いてドリフトを補正するセンサフュージョンが一般的である．
+しかし，省電力なマイクロコントローラ（MCU）でシステムを構成する場合，画像処理やSLAM処理の負荷により，外部観測情報の取得に数百ミリ秒から数秒の観測遅延が生じることが珍しくない．
+遅延を含んだ観測値を単純に現在の推定値へ適用（リセット）すると，遅延期間中に生じた速度推定誤差が修正されず，補正直後から再び急激なドリフトが発生する．
+
+そこで本研究では，数秒から10秒オーダーの長時間遅延が存在する環境下において，MCUの限られた計算資源で実行可能な高精度補正手法「遅延バイアスフィードバック法」を提案する．
+Sony製Spresenseを用いた実機実験を行い，提案手法が計算負荷の高いカルマンフィルタと同等の精度を維持しつつ，極めて低い計算コストで実装可能であることを示す．
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{遅延環境下における推定の課題}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{IMUデッドレコニングの原理}
+IMUから得られる加速度 $\boldsymbol{a}_{body}$ と角速度 $\boldsymbol{\omega}$ を用い，以下のようにGlobal座標系での位置 $\boldsymbol{p}$ と速度 $\boldsymbol{v}$ を推定する．
+まず，角速度を積分して姿勢四元数 $\boldsymbol{q}$ を更新し，回転行列 $\boldsymbol{R}(\boldsymbol{q})$ を用いて加速度をGlobal座標系へ変換する．
+\begin{equation}
+  \boldsymbol{a}_{global} = \boldsymbol{R}(\boldsymbol{q}) \boldsymbol{a}_{body} - \boldsymbol{g}
+\end{equation}
+ここで $\boldsymbol{g}$ は重力加速度ベクトルである．これを用いて速度および位置を更新する．
+\begin{equation}
+  \boldsymbol{v}_{t} = \boldsymbol{v}_{t-1} + \boldsymbol{a}_{global} \Delta t, \quad
+  \boldsymbol{p}_{t} = \boldsymbol{p}_{t-1} + \boldsymbol{v}_{t} \Delta t
+\end{equation}
+
+\subsection{遅延観測の問題点}
+時刻 $t$ において，遅延時間 $\tau$ を含む外部観測位置 $\boldsymbol{p}_{obs}$（時刻 $t-\tau$ の真値相当）が得られたとする．
+最も単純な補正は，現在の推定位置 $\boldsymbol{p}_{est}(t)$ を，観測値との差分（観測残差）に基づいて修正する「単純リセット法」である．
+しかし，位置誤差の主因は，過去から累積した「速度推定値のバイアス誤差」にある．単純リセット法では位置のオフセットのみが修正され，誤った速度推定値は維持されるため，補正が行われた瞬間から再び誤った速度での積分が開始される．
+これにより，推定軌跡は発散挙動を示し，実用的な精度が得られない．
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{提案手法：遅延バイアスフィードバック}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+本研究では，過去の推定履歴を活用し，位置誤差から速度誤差を逆算して直接フィードバックを行う手法を提案する．
+
+\subsection{アルゴリズム概要}
+システムは，IMUの更新周期（1920Hz）ごとに推定された位置の履歴をリングバッファに保持する．
+遅延観測 $\boldsymbol{p}_{obs}$ が到着した際，以下の手順で補正を行う．
+
+\begin{figure}[b]
+  \centering
+  \resizebox{0.95\linewidth}{!}{%
+    \begin{tikzpicture}[
+      node distance=12mm and 8mm, % ノード間の距離を調整
+      block/.style={
+          rectangle,
+          draw=blue!60!black,
+          fill=blue!10,
+          thick,
+          minimum width=22mm,
+          minimum height=10mm,
+          align=center,
+          rounded corners=2pt,
+          font=\small
+        },
+      sum/.style={
+          circle,
+          draw=blue!60!black,
+          fill=blue!10,
+          thick,
+          inner sep=0pt,
+          minimum size=6mm,
+          font=\small
+        },
+      arrow/.style={
+      -{Stealth[length=3mm]},
+      thick,
+      blue!70!black
+      },
+      line/.style={
+          thick,
+          blue!70!black
+        }
+      ]
+
+      % --- メインフロー（DR） ---
+      % IMU Sensor
+      \node[block] (imu) {IMU Sensor};
+
+      % Rotation
+      \node[block, right=of imu] (rot) {Attitude\\Est.};
+
+      % Gravity Comp
+      \node[block, right=of rot] (gravity) {Gravity\\Comp.};
+
+      % Acc Integration -> Velocity
+      \node[block, right=of gravity] (vel) {$\displaystyle \int \! a \, dt$\\ (Velocity)};
+
+      % Vel Integration -> Position
+      \node[block, right=of vel] (pos) {$\displaystyle \int \! v \, dt$\\ (Position)};
+
+      % Output
+      \node[right=8mm of pos] (out) {$\boldsymbol{p}(t)$};
+
+
+      % --- 上段（ジャイロ） ---
+      \node[block, above=10mm of rot] (gyro) {$\displaystyle \int \! \omega \, dt$};
+
+
+      % --- 下段（提案手法：フィードバックループ） ---
+
+      % History Buffer (Position出力から分岐)
+      \node[block, below=15mm of pos] (hist) {History\\Buffer};
+
+      % Summation (Error Calculation)
+      \node[sum, left=of hist] (sum_err) {$\Sigma$};
+
+      % Bias Estimation
+      \node[block, left=of sum_err] (bias) {Bias Est.\\$\boldsymbol{b}_v \approx \boldsymbol{e}_p / \tau$};
+
+      % Delayed Observation Input
+      \node[block, below=8mm of sum_err, fill=orange!10, draw=orange!60!black] (obs) {Delayed Obs.\\$\boldsymbol{p}_{obs}(t)$};
+
+
+      % --- 結線 ---
+
+      % IMU -> Rot/Gyro
+      \draw[arrow] (imu.east) -- (rot.west);
+      \draw[arrow] (imu.east) |- (gyro.west);
+      \draw[arrow] (gyro) -- (rot);
+
+      % Rot -> Grav -> Vel -> Pos -> Out
+      \draw[arrow] (rot) -- (gravity);
+      \draw[arrow] (gravity) -- (vel);
+      \draw[arrow] (vel) -- (pos);
+      \draw[arrow] (pos) -- (out);
+
+      % --- フィードバック線の描画 ---
+
+      % Pos -> History Buffer
+      \draw[arrow] (pos.south) -- (hist.north);
+
+      % History -> Sum (-)
+      \draw[arrow] (hist.west) -- node[above, font=\scriptsize] {$\boldsymbol{p}_{hist}(t-\tau)$} node[below right, font=\scriptsize] {$-$} (sum_err.east);
+
+      % Obs -> Sum (+)
+      \draw[arrow] (obs.north) -- node[right, font=\scriptsize] {$\tau \approx 10s$} node[below right, font=\scriptsize] {$+$} (sum_err.south);
+
+      % Sum -> Bias Est
+      \draw[arrow] (sum_err.west) -- node[above, font=\scriptsize] {$\boldsymbol{e}_p$} (bias.east);
+
+      % Bias Est -> Velocity Correction (Feedback)
+      \draw[line] (bias.west) -| node[above right, font=\scriptsize] {Correction} ($(imu.south)!0.5!(rot.south) + (0, -0.5)$);
+      % ワイヤーを迂回させる
+      \draw[arrow] ($(imu.south)!0.5!(rot.south) + (0, -0.5)$) -| (vel.south) node[below right, font=\scriptsize] {$-$};
+
+    \end{tikzpicture}%
+  }
+  \caption{Block diagram of the proposed Delayed Bias Feedback method}
+  \label{fig:proposed_block}
+\end{figure}
+
+1. \textbf{履歴参照:} バッファから遅延時刻 $t-\tau$ における推定位置 $\boldsymbol{p}_{hist}(t-\tau)$ を取得する．
+
+2. \textbf{誤差算出:} 観測値との位置誤差 $\boldsymbol{e}_p$ を算出する．
+\begin{equation}
+  \boldsymbol{e}_p = \boldsymbol{p}_{obs} - \boldsymbol{p}_{hist}(t-\tau)
+\end{equation}
+\\
+
+3. \textbf{バイアス推定:} この位置誤差が，遅延期間 $\tau$ において一定の速度誤差 $\boldsymbol{b}_v$ が継続した結果であると仮定し，速度バイアスを推定する．
+\begin{equation}
+  \boldsymbol{b}_v \approx \frac{\boldsymbol{e}_p}{\tau}
+\end{equation}
+
+4. \textbf{状態更新:} 現在の推定速度 $\boldsymbol{v}_{est}(t)$ および位置 $\boldsymbol{p}_{est}(t)$ を同時に補正する．
+\begin{equation}
+  \boldsymbol{v}_{new}(t) = \boldsymbol{v}_{est}(t) + \boldsymbol{b}_v
+\end{equation}
+\begin{equation}
+  \boldsymbol{p}_{new}(t) = \boldsymbol{p}_{est}(t) + \boldsymbol{e}_p
+\end{equation}
+
+本手法の特徴は，行列演算や反復計算を必要とせず，単純な四則演算のみ（計算量 $O(1)$）で速度項へのフィードバックを実現する点にある．これにより，Replay法（$O(N)$）やパーティクルフィルタの実装が困難なMCU環境でもリアルタイム動作が可能となる．
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{実験および結果}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{実験条件}
+評価ボードとしてSony Spresense（CXD5602）およびIMUアドオンボード（CXD5602PWBIMU）を使用した．
+IMUのサンプリングレートは1920Hzとした．
+参照真値としてPC側でSLAM等により取得した位置情報を用い，UART通信でマイコン側へ送信する際に，意図的に $\tau=10.0$ [s] の一定遅延を付与した．
+これは，ソナーの取得周期やSLAM処理に時間を有するような過酷な条件である．
+
+\subsection{比較手法}
+以下の3手法の実装と性能比較を行った．
+\begin{enumerate}
+  \item \textbf{単純リセット (Simple Reset):} 観測位置のみを修正し，速度補正を行わない手法．
+  \item \textbf{Augmented KF:} 加速度バイアスを状態に含む拡張カルマンフィルタ．計算負荷低減のため，現在の共分散行列で更新する準最適手法を採用．
+
+        本フィルタのゲイン調整について，事前に静止状態で取得したIMUの実測データに基づき，プロセスノイズ分散（$\sigma_{acc}^2 \approx 1.6 \times 10^{-3}$）を設定した．また，観測ノイズ共分散 $\boldsymbol{R}$ を意図的に極小値（$10^{-8}$）に設定することで，位置観測を最大限に信頼し，位置ズレから速度・バイアス項へのフィードバックを強調するチューニングを行った．
+
+  \item \textbf{提案手法:} 遅延バイアスフィードバック法．
+\end{enumerate}
+\subsection{実験結果}
+各手法による推定軌跡の二乗平均平方根誤差（RMSE）および最大誤差（Max Err）を Table \ref{tab:result} に示す．
+
+\begin{table}[h]
+  \centering
+  \caption{Comparison of Estimation Accuracy (Delay = 10s)}
+  \label{tab:result}
+  \begin{tabular}{l|c|c} \hline
+    Method            & RMSE [m]      & Max Err [m]   \\ \hline \hline
+    Simple Reset      & 0.41          & 1.11          \\
+    Augmented KF      & 0.15          & 0.38          \\
+    \textbf{Proposed} & \textbf{0.14} & \textbf{0.36} \\ \hline
+  \end{tabular}
+\end{table}
+
+単純リセット法では，RMSEが0.41m，最大誤差が1.11mと大きく,誤差推移が確認された．
+これは理論通り，補正後も残留した速度誤差が即座に位置ドリフトを引き起こすためである．
+
+一方，提案手法およびAugmented KFは，RMSEが約0.14〜0.15mと，単純リセット法と比較して約1/3まで誤差を低減した．
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{考察}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{提案手法の優位性}
+Augmented KFが高い精度を示した理由は，フィルタ内の誤差共分散行列 $\boldsymbol{P}$ が持つ非対角成分（位置と速度の相関 $P_{pv}$）を通じて，位置の観測残差が速度項へ統計的にフィードバックされたためである．
+すなわち，Augmented KFは「位置がこれだけ進んでいるなら速度も速すぎたはずだ」という推論を確率モデルを通じて行っている．
+
+提案手法は，この統計的推論と物理的に等価な補正（$\boldsymbol{b}_v = \boldsymbol{e}_p / \tau$）を，明示的な数式として実装したものである．
+結果として，提案手法はAugmented KFと同等の精度を達成しつつ，行列演算（逆行列計算等）や多数のパラメータ調整を一切必要としない．
+SpresenseのようなFPUを持つマイコンであっても，高次元の行列演算は負荷となるが，提案手法は浮動小数点の加減乗除のみで完結するため，実装コード量とCPU負荷を大幅に削減できる点で優位性がある．
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{結論・今後の課題}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+本研究では，10秒という長時間遅延を含む観測環境において，位置誤差から速度バイアスを逆算して補正する「遅延バイアスフィードバック法」を提案した．
+実機実験の結果，提案手法は単純リセット法と比較してRMSEを約1/3に低減し，計算負荷の高いカルマンフィルタと同等の精度を，行列演算を用いない軽量なアルゴリズムで実現した．
+これにより，計算資源の限られた組み込みマイコン環境における遅延対策として，提案手法が極めて有効であることが示された．
+
+今後の展望として，機械学習を用いた推定精度のさらなる向上を検討する．
+本研究で用いた物理モデルベースの手法は計算コストが低い反面，センサの非線形な誤差特性や，床面の微細な振動などの複雑な環境ノイズを完全にモデル化することは困難である．
+近年，深層学習を用いてIMUの誤差特性そのものを学習させ，慣性航法の精度を向上させる研究が報告されている．
+Liuらは，ニューラルネットワークによる変位推定とカルマンフィルタを密に結合したTLIOを提案し，高いロバスト性を示している\cite{tlio}．
+また，宇野らは深層学習に基づくIMUデッドレコニングを水中環境へ適用し，GPSが使用できない環境下での有効性を実証している\cite{uno_naist}．
+
+SpresenseはDNNの推論をハードウェア支援する機能を有しているため，本研究で提案した「遅延フィードバック構造」に，これらの「学習ベースの誤差推定」を組み合わせることで，軽量かつ高精度な自己位置推定システムの構築が可能であると考えられる．
+今後は，Spresense上でのエッジAI実装を進め，物理モデル単独では補正しきれない非線形誤差の低減に取り組む予定である．
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\begin{thebibliography}{9}
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  \bibitem{spresense_sdk}
+  Sony Semiconductor Solutions Corporation,
+  “Spresense SDK API Reference,”
+  \url{https://developer.sony.com/develop/spresense/docs/sdk/}, 2025.
+
+  \bibitem{kalman_delay}
+  T. D. Larsen et al., "Incorporating time-delayed measurements in a discrete-time Kalman filter," Proc. of CDC, 1998.
+
+  \bibitem{tlio}
+  H. Liu et al., "TLIO: Tight Learned Inertial Odometry," IEEE Robotics and Automation Letters, Vol. 5, No. 4, pp. 5653-5660, 2020.
+
+  \bibitem{uno_naist}
+  宇野 拓磨, "深層学習に基づくIMUデッドレコニングを用いた水中オドメトリシステムの開発," 奈良先端科学技術大学院大学 修士論文, 2020.
+
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\end{thebibliography}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

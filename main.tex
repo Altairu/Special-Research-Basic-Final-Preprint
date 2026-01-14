@@ -1,0 +1,67 @@
+% !TeX encoding = UTF-8
+\documentclass{jsarticle}
+
+\usepackage{amsmath,amssymb}
+% \usepackage{thesis} % 必要に応じてコメントアウトまたは修正
+
+\usepackage{advanced}
+\usepackage[dvipdfmx]{graphicx}
+\usepackage{url,amsmath,amssymb,indent}
+\usepackage{mymacro}
+% 図を固定配置するため
+\usepackage{float}
+
+% TikZ描画に必要
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, shapes, calc,positioning, shapes.geometric,}
+
+
+\usepackage{tabularx} % ← まだ読み込んでなければ冒頭で追加
+
+% 段落設定
+\setlength{\parindent}{1zw}   % 段落の字下げを1全角文字分に設定
+\setlength{\parskip}{0pt}     % 段落間の空白を0に設定
+
+\makeatletter
+\def\@listi{\leftmargin\leftmargini
+\parsep \z@
+\topsep 0.2\baselineskip \@plus 0.2\baselineskip \@minus 0.1\baselineskip
+\itemsep \z@ \relax}
+\let\@listI\@listi
+\makeatother
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\begin{document}
+\title{遅延観測に対応した軽量IMUデッドレコニング}
+\author{野口 史遠(電気電子システム工学コース)}
+\engtitle{
+  Lightweight IMU Dead Reckoning Supporting Delayed Observation
+}
+\engauthor{
+  Shion Noguchi (Electrical and Electronic System Engineering Course)
+}
+% Electrical and Electronic System Engineering Course
+% Mechanical and Control System Engineering Course
+% Civil Engineering and Architecture Course
+% Department of Multidisciplinary Engineering
+
+\abstract{
+  In this study, we propose a lightweight "Delayed Bias Feedback" method to correct IMU dead reckoning errors caused by observation delays. By inversely estimating velocity bias from position error using a history buffer, the method achieves robust estimation with minimal computational complexity. Experiments using a Sony Spresense microcontroller demonstrate that the proposed method achieves accuracy comparable to a Kalman Filter.
+}
+
+\keyword{IMU, Dead Reckoning, Sensor Fusion, Attitude Estimation, Position Estimation}
+
+\maketitle%
+\setcounter{page}{1}% ページ番号の初期値
+%\thispagestyle{empty}
+%\pagestyle{empty}
+
+\setlength{\abovedisplayskip}{3.5pt} % 上部のマージン
+\setlength{\belowdisplayskip}{4.5pt} % 下部のマージン
+\setlength{\jot}{0pt} % 
+
+
+\input{doc.tex}
+\end{document}
